@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">SmartGlasses</string>
+    <string name="scan_devices">Поиск устройств</string>
+    <string name="connect">Подключить</string>
+    <string name="disconnect">Отключить</string>
+    <string name="status_idle">Ожидание подключения</string>
+    <string name="status_connected">Подключено к очкам</string>
+    <string name="status_scanning">Поиск…</string>
+    <string name="send_command">Отправить команду</string>
+    <string name="battery">Батарея</string>
+    <string name="temp">Температура</string>
+    <string name="signal">Сигнал</string>
+</resources>
