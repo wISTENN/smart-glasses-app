@@ -157,9 +157,9 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SmartGlasses Assistant")
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .build()
-    }
+            .setSmallIcon(android.R.drawable.sym_def_app_icon)
+        .build()
+}
 
     override fun onDestroy() {
         super.onDestroy()
