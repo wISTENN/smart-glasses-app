@@ -1,5 +1,7 @@
 package com.smartglasses.app.service
 
+import com.smartglasses.app.BuildConfig
+import com.smartglasses.app.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
