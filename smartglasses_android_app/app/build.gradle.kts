@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.smartglasses"
+    namespace = "com.smartglasses.app"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.smartglasses"
+        applicationId = "com.smartglasses.app"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
@@ -30,6 +30,7 @@ android {
     buildFeatures {
         dataBinding = true
         viewBinding = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -49,10 +50,10 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
-    // Корутины (для асинхронных задач и Gemini API)
+    // Корутины
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Сеть (OkHttp & Gson для запросов к Gemini)
+    // Сеть (OkHttp & Gson)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
 
