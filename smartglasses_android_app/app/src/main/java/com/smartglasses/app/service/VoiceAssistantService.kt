@@ -15,7 +15,6 @@ import android.os.IBinder
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.smartglasses.app.R
 import com.smartglasses.app.network.GeminiApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
