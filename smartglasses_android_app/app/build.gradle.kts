@@ -1,24 +1,20 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
 android {
-    namespace = "com.smartglasses.app"
+    namespace = "com.example.smartglasses"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.smartglasses.app"
-        minSdk = 24
+        applicationId = "com.example.smartglasses"
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        
-        buildConfigField("String", "GEMINI_API_KEY", "\"\"")
     }
 
     buildTypes {
@@ -30,19 +26,24 @@ android {
             )
         }
     }
+
+    buildFeatures {
+        dataBinding = true
+        viewBinding = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
-    }
-    buildFeatures {
-        buildConfig = true
     }
 }
 
 dependencies {
+    // Базовые зависимости AndroidX
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
