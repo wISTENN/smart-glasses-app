@@ -1,4 +1,4 @@
-package com.smartglasses.app
+package com.smartglasses.app.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -24,11 +24,13 @@ import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.smartglasses.app.MainActivity
+import com.smartglasses.app.network.GeminiApiClient
+import com.smartglasses.app.receiver.MediaButtonReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 
@@ -125,7 +127,6 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             )
             setMediaButtonReceiver(pendingIntent)
 
-            // Важно: Устанавливаем статус PLAYING, чтобы Android отдавал клики даже на заблокированном экране
             val state = PlaybackStateCompat.Builder()
                 .setActions(
                     PlaybackStateCompat.ACTION_PLAY or
@@ -193,7 +194,6 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "Service onStartCommand action: ${intent?.action}")
 
-        // Убеждаемся, что MediaSession активно
         mediaSession?.isActive = true
         requestAudioFocus()
 
