@@ -110,59 +110,60 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private fun setupMediaSession() {
         val mediaButtonReceiver = ComponentName(this, MediaButtonReceiver::class.java)
-        mediaSession = MediaSessionCompat(this, "VoiceAssistantService", mediaButtonReceiver, null).apply {
-            setFlags(
-                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
-                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
-            )
+        val session = MediaSessionCompat(this, "VoiceAssistantService", mediaButtonReceiver, null)
+        
+        session.setFlags(
+            MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+            MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+        )
 
-            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                component = mediaButtonReceiver
-            }
-            val pendingIntent = PendingIntent.getBroadcast(
-                this@VoiceAssistantService,
-                0,
-                mediaButtonIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            setMediaButtonReceiver(pendingIntent)
-
-            val state = PlaybackStateCompat.Builder()
-                .setActions(
-                    PlaybackStateCompat.ACTION_PLAY or
-                    PlaybackStateCompat.ACTION_PAUSE or
-                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                    PlaybackStateCompat.ACTION_STOP
-                )
-                .setState(PlaybackStateCompat.STATE_PLAYING, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
-                .build()
-
-            setPlaybackState(state)
-
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    Log.d(TAG, "MediaSessionCompat.Callback onMediaButtonEvent: $mediaButtonEvent")
-                    return MediaButtonReceiver.handleMediaButtonIntent(this@VoiceAssistantService, mediaButtonEvent)
-                }
-
-                override fun onPlay() {
-                    Log.d(TAG, "MediaSessionCompat onPlay")
-                    toggleRecording()
-                }
-
-                override fun onPause() {
-                    Log.d(TAG, "MediaSessionCompat onPause")
-                    toggleRecording()
-                }
-
-                override fun onStop() {
-                    Log.d(TAG, "MediaSessionCompat onStop")
-                    if (isRecording) stopRecordingAndSend()
-                }
-            })
-
-            isActive = true
+        val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            component = mediaButtonReceiver
         }
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            0,
+            mediaButtonIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        session.setMediaButtonReceiver(pendingIntent)
+
+        val state = PlaybackStateCompat.Builder()
+            .setActions(
+                PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_STOP
+            )
+            .setState(PlaybackStateCompat.STATE_PLAYING, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .build()
+
+        session.setPlaybackState(state)
+
+        session.setCallback(object : MediaSessionCompat.Callback() {
+            override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                Log.d(TAG, "MediaSessionCompat.Callback onMediaButtonEvent: $mediaButtonEvent")
+                return MediaButtonReceiver.handleMediaButtonIntent(this@VoiceAssistantService, mediaButtonEvent)
+            }
+
+            override fun onPlay() {
+                Log.d(TAG, "MediaSessionCompat onPlay")
+                toggleRecording()
+            }
+
+            override fun onPause() {
+                Log.d(TAG, "MediaSessionCompat onPause")
+                toggleRecording()
+            }
+
+            override fun onStop() {
+                Log.d(TAG, "MediaSessionCompat onStop")
+                if (isRecording) stopRecordingAndSend()
+            }
+        })
+
+        session.isActive = true
+        mediaSession = session
     }
 
     private fun requestAudioFocus() {
@@ -172,7 +173,7 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
 
-            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(playbackAttributes)
                 .setAcceptsDelayedFocusGain(true)
                 .setOnAudioFocusChangeListener { focusChange ->
@@ -180,7 +181,8 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
                 }
                 .build()
 
-            audioManager?.requestAudioFocus(audioFocusRequest!!)
+            audioFocusRequest = focusRequest
+            audioManager?.requestAudioFocus(focusRequest)
         } else {
             @Suppress("DEPRECATION")
             audioManager?.requestAudioFocus(
@@ -309,16 +311,12 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             Log.d(TAG, "Sending audio to Gemini...")
             val response = GeminiApiClient.sendAudioToGemini(base64Pcm, SAMPLE_RATE)
             Log.d(TAG, "Gemini response: $response")
-            if (!response.isNull_or_empty_or_error()) {
+            if (!response.isNullOrBlank() && !response.startsWith("Ошибка")) {
                 speak(response)
             } else {
                 speak("Не удалось получить ответ от ассистента")
             }
         }
-    }
-
-    private fun String?.isNull_or_empty_or_error(): Boolean {
-        return this.isNullOrBlank() || this.startsWith("Ошибка")
     }
 
     private fun speak(text: String) {
@@ -357,13 +355,13 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             Log.e(TAG, "Error releasing ToneGenerator", e)
         }
 
-        mediaSession?.run {
-            isActive = false
-            release()
+        mediaSession?.let {
+            it.isActive = false
+            it.release()
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
-            audioManager?.abandonAudioFocusRequest(audioFocusRequest!!)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
         }
 
         tts?.stop()
