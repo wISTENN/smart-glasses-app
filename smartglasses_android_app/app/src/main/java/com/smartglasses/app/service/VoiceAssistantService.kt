@@ -1,214 +1,376 @@
-package com.smartglasses.app.service
+package com.smartglasses.app
 
-import com.smartglasses.app.BuildConfig
-import com.smartglasses.app.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
-import android.media.AudioFormat
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.ToneGenerator
-import android.media.session.MediaSession
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.smartglasses.app.network.GeminiApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import java.io.File
-import java.io.FileOutputStream
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 
 class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
 
-    companion object {
-        const val ACTION_START = "com.smartglasses.app.action.START"
-        const val ACTION_MEDIA_BUTTON = "com.smartglasses.app.action.MEDIA_BUTTON"
-        private const val CHANNEL_ID = "voice_assistant_channel"
-        private const val CHANNEL_NAME = "Voice Assistant"
+    private companion object {
+        private const val TAG = "VoiceAssistantService"
+        private const val CHANNEL_ID = "VoiceAssistantChannel"
+        private const val NOTIFICATION_ID = 1
+        private const val SAMPLE_RATE = 16000
     }
 
+    private var isRecording = false
+    private var audioRecord: AudioRecord? = null
+    private var recordingThread: Thread? = null
+    private val audioDataStream = ByteArrayOutputStream()
+
+    private var mediaSession: MediaSessionCompat? = null
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+
     private var tts: TextToSpeech? = null
-    private var captureJob: Job? = null
-    private var isProcessing = AtomicBoolean(false)
-    private lateinit var geminiClient: GeminiApiClient
-    
+    private var isTtsReady = false
+
+    private val serviceJob = Job()
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
+
     private var toneGenerator: ToneGenerator? = null
-    private var mediaSession: MediaSession? = null
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        geminiClient = GeminiApiClient(apiKey)
-        tts = TextToSpeech(this, this)
+        Log.d(TAG, "Service onCreate")
+        startForegroundServiceWithNotification()
+
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         try {
             toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
         } catch (e: Exception) {
-            Log.e("VoiceAssistantService", "Failed to init ToneGenerator", e)
+            Log.e(TAG, "Failed to create ToneGenerator", e)
         }
 
-        mediaSession = MediaSession(this, "SmartGlassesMediaSession").apply {
-            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+        setupMediaSession()
+        requestAudioFocus()
+
+        tts = TextToSpeech(this, this)
+    }
+
+    private fun startForegroundServiceWithNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Voice Assistant Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+
+        val notificationIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, notificationIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Smart Glasses Assistant")
+            .setContentText("Слушает кнопку гарнитуры...")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
+    private fun setupMediaSession() {
+        val mediaButtonReceiver = ComponentName(this, MediaButtonReceiver::class.java)
+        mediaSession = MediaSessionCompat(this, "VoiceAssistantService", mediaButtonReceiver, null).apply {
+            setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+
+            val mediaButtonIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                component = mediaButtonReceiver
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                this@VoiceAssistantService,
+                0,
+                mediaButtonIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            setMediaButtonReceiver(pendingIntent)
+
+            // Важно: Устанавливаем статус PLAYING, чтобы Android отдавал клики даже на заблокированном экране
+            val state = PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY or
+                    PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                    PlaybackStateCompat.ACTION_STOP
+                )
+                .setState(PlaybackStateCompat.STATE_PLAYING, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                .build()
+
+            setPlaybackState(state)
+
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    Log.d(TAG, "MediaSessionCompat.Callback onMediaButtonEvent: $mediaButtonEvent")
+                    return MediaButtonReceiver.handleMediaButtonIntent(this@VoiceAssistantService, mediaButtonEvent)
+                }
+
+                override fun onPlay() {
+                    Log.d(TAG, "MediaSessionCompat onPlay")
+                    toggleRecording()
+                }
+
+                override fun onPause() {
+                    Log.d(TAG, "MediaSessionCompat onPause")
+                    toggleRecording()
+                }
+
+                override fun onStop() {
+                    Log.d(TAG, "MediaSessionCompat onStop")
+                    if (isRecording) stopRecordingAndSend()
+                }
+            })
+
             isActive = true
         }
+    }
 
-        startForeground(1, buildNotification("Голосовой ассистент готов"))
+    private fun requestAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { focusChange ->
+                    Log.d(TAG, "AudioFocus change: $focusChange")
+                }
+                .build()
+
+            audioManager?.requestAudioFocus(audioFocusRequest!!)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager?.requestAudioFocus(
+                { focusChange -> Log.d(TAG, "AudioFocus change: $focusChange") },
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "Service onStartCommand action: ${intent?.action}")
+
+        // Убеждаемся, что MediaSession активно
+        mediaSession?.isActive = true
+        requestAudioFocus()
+
         when (intent?.action) {
-            ACTION_START -> {
-                startForeground(1, buildNotification("Сервис запущен"))
-            }
-            ACTION_MEDIA_BUTTON -> {
-                handleMediaButtonPress()
-            }
+            "TOGGLE_RECORDING" -> toggleRecording()
+            "START_RECORDING" -> if (!isRecording) startRecording()
+            "STOP_RECORDING" -> if (isRecording) stopRecordingAndSend()
         }
+
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    fun toggleRecording() {
+        if (isRecording) {
+            stopRecordingAndSend()
+        } else {
+            startRecording()
+        }
+    }
 
-    private fun handleMediaButtonPress() {
-        if (!isProcessing.compareAndSet(false, true)) {
-            Log.d("VoiceAssistantService", "Ignoring duplicate media button press")
+    private fun playBeep(toneType: Int) {
+        try {
+            toneGenerator?.startTone(toneType, 150)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error playing beep tone", e)
+        }
+    }
+
+    private fun startRecording() {
+        if (isRecording) return
+
+        playBeep(ToneGenerator.TONE_PROP_BEEP)
+
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
+            android.media.AudioFormat.CHANNEL_IN_MONO,
+            android.media.AudioFormat.ENCODING_PCM_16BIT
+        )
+
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE,
+                android.media.AudioFormat.CHANNEL_IN_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT,
+                minBufferSize.coerceAtLeast(2048)
+            )
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord initialization failed, fallback to MIC")
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE,
+                    android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT,
+                    minBufferSize.coerceAtLeast(2048)
+                )
+            }
+
+            audioDataStream.reset()
+            audioRecord?.startRecording()
+            isRecording = true
+
+            recordingThread = Thread {
+                val buffer = ByteArray(1024)
+                while (isRecording) {
+                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    if (read > 0) {
+                        synchronized(audioDataStream) {
+                            audioDataStream.write(buffer, 0, read)
+                        }
+                    }
+                }
+            }
+            recordingThread?.start()
+            Log.d(TAG, "Recording started")
+
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Permission denied for recording", e)
+            speak("Нет разрешения на запись аудио")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting recording", e)
+        }
+    }
+
+    private fun stopRecordingAndSend() {
+        if (!isRecording) return
+
+        playBeep(ToneGenerator.TONE_PROP_BEEP2)
+
+        isRecording = false
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+            recordingThread?.join(1000)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping AudioRecord", e)
+        }
+
+        val pcmData = synchronized(audioDataStream) {
+            audioDataStream.toByteArray()
+        }
+
+        if (pcmData.isEmpty()) {
+            Log.w(TAG, "Audio data is empty")
             return
         }
 
-        captureJob?.cancel()
-        captureJob = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                // Пик 1: Запись началась
-                playBeepStart()
+        val base64Pcm = Base64.encodeToString(pcmData, Base64.NO_WRAP)
 
-                val file = recordWhisperForSeconds(5)
-
-                // Пик 2: Запись завершена
-                playBeepEnd()
-
-                val transcript = geminiClient.transcribeAudio(file)
-                if (transcript.isEmpty() || transcript == "Ошибка распознавания речи" || transcript == "Не удалось распознать речь") {
-                    speakAnswer("Не удалось распознать речь")
-                    return@launch
-                }
-                speakAnswer(transcript)
-                Log.d("VoiceAssistantService", "Recognized: $transcript")
-            } catch (e: Exception) {
-                Log.e("VoiceAssistantService", "Capture failed", e)
-                speakAnswer("Ошибка доступа к микрофону")
-            } finally {
-                isProcessing.set(false)
+        serviceScope.launch {
+            Log.d(TAG, "Sending audio to Gemini...")
+            val response = GeminiApiClient.sendAudioToGemini(base64Pcm, SAMPLE_RATE)
+            Log.d(TAG, "Gemini response: $response")
+            if (!response.isNull_or_empty_or_error()) {
+                speak(response)
+            } else {
+                speak("Не удалось получить ответ от ассистента")
             }
         }
     }
 
-    private fun playBeepStart() {
-        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+    private fun String?.isNull_or_empty_or_error(): Boolean {
+        return this.isNullOrBlank() || this.startsWith("Ошибка")
     }
 
-    private fun playBeepEnd() {
-        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 150)
-    }
-
-    private fun recordWhisperForSeconds(seconds: Int): File {
-        val sampleRate = 16000
-        val channelConfig = AudioFormat.CHANNEL_IN_MONO
-        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-        val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-
-        // Используем универсальный источник MIC, чтобы Samsung не блокировал доступ
-        val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize.coerceAtLeast(2048)
-        )
-
-        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-            throw IllegalStateException("Microphone hardware not ready")
-        }
-
-        val file = File(cacheDir, "whisper_command.wav")
-        if (file.exists()) file.delete()
-
-        val output = FileOutputStream(file)
-        val tempBuffer = ByteArray(bufferSize.coerceAtLeast(2048))
-        
-        // Расчёт байт для 16-bit моно (16000 Гц * 2 байта на сэмпл * секунды)
-        val targetBytes = sampleRate * 2 * seconds
-        var totalBytesRead = 0
-
-        audioRecord.startRecording()
-        try {
-            while (totalBytesRead < targetBytes) {
-                val read = audioRecord.read(tempBuffer, 0, tempBuffer.size)
-                if (read > 0) {
-                    output.write(tempBuffer, 0, read)
-                    totalBytesRead += read
-                } else if (read < 0) {
-                    // Страховка: если микрофон отдал ошибку, выходим из цикла, а не зависаем
-                    Log.e("VoiceAssistantService", "AudioRecord error code: $read")
-                    break
-                }
+    private fun speak(text: String) {
+        Handler(Looper.getMainLooper()).post {
+            if (isTtsReady) {
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "GeminiTTS")
+            } else {
+                Log.w(TAG, "TTS is not ready yet")
             }
-        } finally {
-            output.flush()
-            output.close()
-            audioRecord.stop()
-            audioRecord.release()
-        }
-
-        return file
-    }
-
-    private fun speakAnswer(text: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            tts?.language = Locale("ru")
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "voice_assistant")
         }
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts?.language = Locale("ru")
+            val result = tts?.setLanguage(Locale("ru", "RU"))
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.e(TAG, "Language RU is not supported")
+                tts?.setLanguage(Locale.US)
+            }
+            isTtsReady = true
+            Log.d(TAG, "TTS Initialized successfully")
+        } else {
+            Log.e(TAG, "TTS Initialization failed")
         }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_LOW
-            )
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
-        }
-    }
-
-    private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SmartGlasses Assistant")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.sym_def_app_icon)
-            .build()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        isRecording = false
+        serviceJob.cancel()
+
+        try {
+            toneGenerator?.release()
+            toneGenerator = null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing ToneGenerator", e)
+        }
+
+        mediaSession?.run {
+            isActive = false
+            release()
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
+            audioManager?.abandonAudioFocusRequest(audioFocusRequest!!)
+        }
+
+        tts?.stop()
         tts?.shutdown()
-        toneGenerator?.release()
-        mediaSession?.release()
+
+        Log.d(TAG, "Service onDestroy")
     }
+
+    override fun onBind(intent: Intent?): IBinder? = null
 }
