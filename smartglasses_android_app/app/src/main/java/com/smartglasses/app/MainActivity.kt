@@ -17,7 +17,6 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        // Проверяем главным образом микрофон. Если он есть — запускаем!
         val audioGranted = result[Manifest.permission.RECORD_AUDIO] 
             ?: (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
 
@@ -63,7 +62,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun startAssistant() {
         val intent = Intent(this, VoiceAssistantService::class.java)
-        intent.action = VoiceAssistantService.ACTION_START
         ContextCompat.startForegroundService(this, intent)
         Toast.makeText(this, "Голосовой ассистент запущен", Toast.LENGTH_SHORT).show()
     }
