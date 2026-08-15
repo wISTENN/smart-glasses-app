@@ -8,8 +8,11 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.ToneGenerator
+import android.media.session.MediaSession
 import android.os.Build
 import android.os.IBinder
 import android.speech.tts.TextToSpeech
@@ -38,6 +41,9 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
     private var captureJob: Job? = null
     private var isProcessing = AtomicBoolean(false)
     private lateinit var geminiClient: GeminiApiClient
+    
+    private var toneGenerator: ToneGenerator? = null
+    private var mediaSession: MediaSession? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -45,6 +51,18 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         val apiKey = BuildConfig.GEMINI_API_KEY
         geminiClient = GeminiApiClient(apiKey)
         tts = TextToSpeech(this, this)
+
+        try {
+            toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+        } catch (e: Exception) {
+            Log.e("VoiceAssistantService", "Failed to init ToneGenerator", e)
+        }
+
+        mediaSession = MediaSession(this, "SmartGlassesMediaSession").apply {
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+            isActive = true
+        }
+
         startForeground(1, buildNotification("Голосовой ассистент готов"))
     }
 
@@ -71,21 +89,36 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         captureJob?.cancel()
         captureJob = CoroutineScope(Dispatchers.IO).launch {
             try {
+                // Пик 1: Запись началась
+                playBeepStart()
+
                 val file = recordWhisperForSeconds(5)
+
+                // Пик 2: Запись завершена
+                playBeepEnd()
+
                 val transcript = geminiClient.transcribeAudio(file)
                 if (transcript.isEmpty() || transcript == "Ошибка распознавания речи" || transcript == "Не удалось распознать речь") {
-                    speakAnswer("Не удалось распознать шепот")
+                    speakAnswer("Не удалось распознать речь")
                     return@launch
                 }
                 speakAnswer(transcript)
                 Log.d("VoiceAssistantService", "Recognized: $transcript")
             } catch (e: Exception) {
                 Log.e("VoiceAssistantService", "Capture failed", e)
-                speakAnswer("Ошибка голосового ввода")
+                speakAnswer("Ошибка доступа к микрофону")
             } finally {
                 isProcessing.set(false)
             }
         }
+    }
+
+    private fun playBeepStart() {
+        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+    }
+
+    private fun playBeepEnd() {
+        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 150)
     }
 
     private fun recordWhisperForSeconds(seconds: Int): File {
@@ -94,29 +127,40 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
 
+        // Используем универсальный источник MIC, чтобы Samsung не блокировал доступ
         val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.MIC,
             sampleRate,
             channelConfig,
             audioFormat,
             bufferSize.coerceAtLeast(2048)
         )
 
+        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+            throw IllegalStateException("Microphone hardware not ready")
+        }
+
         val file = File(cacheDir, "whisper_command.wav")
         if (file.exists()) file.delete()
 
         val output = FileOutputStream(file)
         val tempBuffer = ByteArray(bufferSize.coerceAtLeast(2048))
-        val targetSamples = sampleRate * seconds
-        var totalRead = 0
+        
+        // Расчёт байт для 16-bit моно (16000 Гц * 2 байта на сэмпл * секунды)
+        val targetBytes = sampleRate * 2 * seconds
+        var totalBytesRead = 0
 
         audioRecord.startRecording()
         try {
-            while (totalRead < targetSamples) {
+            while (totalBytesRead < targetBytes) {
                 val read = audioRecord.read(tempBuffer, 0, tempBuffer.size)
                 if (read > 0) {
                     output.write(tempBuffer, 0, read)
-                    totalRead += read
+                    totalBytesRead += read
+                } else if (read < 0) {
+                    // Страховка: если микрофон отдал ошибку, выходим из цикла, а не зависаем
+                    Log.e("VoiceAssistantService", "AudioRecord error code: $read")
+                    break
                 }
             }
         } finally {
@@ -158,11 +202,13 @@ class VoiceAssistantService : Service(), TextToSpeech.OnInitListener {
             .setContentTitle("SmartGlasses Assistant")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.sym_def_app_icon)
-        .build()
-}
+            .build()
+    }
 
     override fun onDestroy() {
         super.onDestroy()
         tts?.shutdown()
+        toneGenerator?.release()
+        mediaSession?.release()
     }
 }
