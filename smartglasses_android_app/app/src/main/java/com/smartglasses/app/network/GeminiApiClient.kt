@@ -9,11 +9,17 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class GeminiApiClient(
     private val apiKey: String
 ) {
-    private val client = OkHttpClient()
+    // Настраиваем таймауты, чтобы запросы с аудио не обрывались
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
 
     fun transcribeAudio(file: File): String {
         val audioBytes = file.readBytes()
@@ -28,7 +34,7 @@ class GeminiApiClient(
                         JSONArray()
                             .put(
                                 JSONObject()
-                                    .put("text", "Слушай это аудио и расшифруй речь на русском языке. Верни только текст, без пояснений.")
+                                    .put("text", "Это аудиосообщение от пользователя. Послушай его и дай короткий, четкий и понятный ответ на русском языке для озвучки в наушник.")
                             )
                             .put(
                                 JSONObject().put(
@@ -46,8 +52,9 @@ class GeminiApiClient(
         val body = payload.toString()
             .toRequestBody("application/json; charset=utf-8".toMediaType())
 
+        // Исправлена модель на рабочую gemini-1.5-flash
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey")
             .post(body)
             .build()
 
@@ -55,16 +62,16 @@ class GeminiApiClient(
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     Log.e("GeminiApiClient", "HTTP error: ${response.code} ${response.message}")
-                    return "Ошибка распознавания речи"
+                    return "Ошибка ответа от Gemini (${response.code})"
                 }
 
                 val responseText = response.body?.string() ?: "{}"
                 val json = JSONObject(responseText)
-                val candidates = json.optJSONArray("candidates") ?: return "Не удалось распознать речь"
+                val candidates = json.optJSONArray("candidates") ?: return "Не удалось обработать ответ"
 
-                val firstCandidate = candidates.optJSONObject(0) ?: return "Не удалось распознать речь"
-                val content = firstCandidate.optJSONObject("content") ?: return "Не удалось распознать речь"
-                val parts = content.optJSONArray("parts") ?: return "Не удалось распознать речь"
+                val firstCandidate = candidates.optJSONObject(0) ?: return "Не удалось обработать ответ"
+                val content = firstCandidate.optJSONObject("content") ?: return "Не удалось обработать ответ"
+                val parts = content.optJSONArray("parts") ?: return "Не удалось обработать ответ"
 
                 val builder = StringBuilder()
                 for (i in 0 until parts.length()) {
@@ -73,7 +80,7 @@ class GeminiApiClient(
                     if (text.isNotEmpty()) builder.append(text)
                 }
 
-                builder.toString().ifEmpty { "Не удалось распознать речь" }
+                builder.toString().ifEmpty { "Пустой ответ от ассистента" }
             }
         } catch (e: Exception) {
             Log.e("GeminiApiClient", "Gemini request failed", e)
