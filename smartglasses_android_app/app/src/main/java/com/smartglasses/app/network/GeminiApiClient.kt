@@ -2,28 +2,32 @@ package com.smartglasses.app.network
 
 import android.util.Base64
 import android.util.Log
+import com.smartglasses.app.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.util.concurrent.TimeUnit
 
-class GeminiApiClient(
-    private val apiKey: String
-) {
-    // Настраиваем таймауты, чтобы запросы с аудио не обрывались
+object GeminiApiClient {
+    private const val TAG = "GeminiApiClient"
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun transcribeAudio(file: File): String {
-        val audioBytes = file.readBytes()
-        val base64Audio = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+    suspend fun sendAudioToGemini(base64Pcm: String, sampleRate: Int): String = withContext(Dispatchers.IO) {
+        val apiKey = BuildConfig.GEMINI_API_KEY
+        if (apiKey.isBlank()) {
+            Log.e(TAG, "GEMINI_API_KEY is empty")
+            return@withContext "Ошибка: API ключ не найден"
+        }
 
         val payload = JSONObject().apply {
             put(
@@ -33,15 +37,17 @@ class GeminiApiClient(
                         "parts",
                         JSONArray()
                             .put(
-                                JSONObject()
-                                    .put("text", "Это аудиосообщение от пользователя. Послушай его и дай короткий, четкий и понятный ответ на русском языке для озвучки в наушник.")
+                                JSONObject().put(
+                                    "text",
+                                    "Это аудиосообщение от пользователя. Послушай его и дай короткий, четкий и понятный ответ на русском языке для озвучки в наушник."
+                                )
                             )
                             .put(
                                 JSONObject().put(
                                     "inline_data",
                                     JSONObject()
-                                        .put("mime_type", "audio/wav")
-                                        .put("data", base64Audio)
+                                        .put("mime_type", "audio/pcm")
+                                        .put("data", base64Pcm)
                                 )
                             )
                     )
@@ -52,26 +58,25 @@ class GeminiApiClient(
         val body = payload.toString()
             .toRequestBody("application/json; charset=utf-8".toMediaType())
 
-        // Исправлена модель на рабочую gemini-1.5-flash
         val request = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey")
             .post(body)
             .build()
 
-        return try {
+        try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.e("GeminiApiClient", "HTTP error: ${response.code} ${response.message}")
-                    return "Ошибка ответа от Gemini (${response.code})"
+                    Log.e(TAG, "HTTP error: ${response.code} ${response.message}")
+                    return@withContext "Ошибка ответа от Gemini (${response.code})"
                 }
 
                 val responseText = response.body?.string() ?: "{}"
                 val json = JSONObject(responseText)
-                val candidates = json.optJSONArray("candidates") ?: return "Не удалось обработать ответ"
+                val candidates = json.optJSONArray("candidates") ?: return@withContext "Не удалось обработать ответ"
 
-                val firstCandidate = candidates.optJSONObject(0) ?: return "Не удалось обработать ответ"
-                val content = firstCandidate.optJSONObject("content") ?: return "Не удалось обработать ответ"
-                val parts = content.optJSONArray("parts") ?: return "Не удалось обработать ответ"
+                val firstCandidate = candidates.optJSONObject(0) ?: return@withContext "Не удалось обработать ответ"
+                val content = firstCandidate.optJSONObject("content") ?: return@withContext "Не удалось обработать ответ"
+                val parts = content.optJSONArray("parts") ?: return@withContext "Не удалось обработать ответ"
 
                 val builder = StringBuilder()
                 for (i in 0 until parts.length()) {
@@ -83,7 +88,7 @@ class GeminiApiClient(
                 builder.toString().ifEmpty { "Пустой ответ от ассистента" }
             }
         } catch (e: Exception) {
-            Log.e("GeminiApiClient", "Gemini request failed", e)
+            Log.e(TAG, "Gemini request failed", e)
             "Ошибка сети при обращении к Gemini"
         }
     }
