@@ -17,11 +17,14 @@ class MainActivity : AppCompatActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        val granted = result.all { it.value }
-        if (granted) {
+        // Проверяем главным образом микрофон. Если он есть — запускаем!
+        val audioGranted = result[Manifest.permission.RECORD_AUDIO] 
+            ?: (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+
+        if (audioGranted) {
             startAssistant()
         } else {
-            Toast.makeText(this, "Нужны разрешения на микрофон и уведомления", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Для работы ассистента нужен доступ к микрофону!", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -51,7 +54,7 @@ class MainActivity : AppCompatActivity() {
             required.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        if (required.isEmpty()) {
+        if (required.isEmpty() || ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             startAssistant()
         } else {
             permissionLauncher.launch(required.toTypedArray())
